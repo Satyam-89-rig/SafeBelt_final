@@ -328,9 +328,11 @@ class SeatbeltDetector:
         cap = cv2.VideoCapture(cam_src)
         if cap.isOpened():
         # Force YUY2 decode on Windows to fix corrupted frames
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'YUY2'))
+            cap = cv2.VideoCapture(cam_src, cv2.CAP_DSHOW)  # CAP_DSHOW = Windows DirectShow
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            cap.set(cv2.CAP_PROP_FPS, 15)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             self._cap = cap
             logger.info("Camera opened at source: %s", cam_src)
             return
@@ -375,7 +377,7 @@ class SeatbeltDetector:
                 with self._frame_lock:
                     self._latest_frame  = frame
                     self._latest_result = result
-            time.sleep(1.0 / DEMO_FPS)
+            time.sleep(1.0 / 30)
 
     def _read_frame(self) -> tuple[bool, Optional[np.ndarray]]:
         if self._cap is None:
