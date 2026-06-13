@@ -7,6 +7,8 @@ Endpoints:
   GET  /api/stats                 Aggregate stats + violations/hour histogram
   GET  /api/ocr_status            EasyOCR load state {ready, loading}
 """
+from dotenv import load_dotenv
+load_dotenv()
 import asyncio
 import base64
 import logging
