@@ -10,9 +10,13 @@ export default function ViolationsLog() {
   const [loading,  setLoading]  = useState(true);
   const [dateFilter, setDate]   = useState("");
   const [locFilter,  setLoc]    = useState("");
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
 
   const fetchViolations = useCallback(async (p = 1) => {
     setLoading(true);
+    setSelectedIds(new Set());
+    setShowBulkDeleteConfirm(false);
     try {
       const params = new URLSearchParams({ page: p, page_size: PAGE_SIZE });
       if (dateFilter) params.append("date",     dateFilter);
@@ -30,6 +34,76 @@ export default function ViolationsLog() {
       setLoading(false);
     }
   }, [dateFilter, locFilter]);
+
+  const handleToggleSelect = (id) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const handleSelectAll = () => {
+    const allIdsOnPage = items.map(item => item.id);
+    const areAllSelected = allIdsOnPage.every(id => selectedIds.has(id));
+
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (areAllSelected) {
+        allIdsOnPage.forEach(id => next.delete(id));
+      } else {
+        allIdsOnPage.forEach(id => next.add(id));
+      }
+      return next;
+    });
+  };
+
+  const handleDeleteSingle = async (id) => {
+    try {
+      const res = await fetch(`/api/violations/${id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Delete failed");
+      
+      setSelectedIds(prev => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+
+      const isLastItemOnPage = items.length === 1;
+      const targetPage = isLastItemOnPage && page > 1 ? page - 1 : page;
+      await fetchViolations(targetPage);
+    } catch (e) {
+      console.error(e);
+      alert("Failed to delete record");
+    }
+  };
+
+  const handleBulkDelete = async () => {
+    try {
+      const idsArray = Array.from(selectedIds);
+      const res = await fetch("/api/violations/bulk-delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: idsArray }),
+      });
+      if (!res.ok) throw new Error("Bulk delete failed");
+      
+      setSelectedIds(new Set());
+      setShowBulkDeleteConfirm(false);
+
+      const numDeletedOnCurrentPage = items.filter(item => selectedIds.has(item.id)).length;
+      const isCurrentPageFullyDeleted = numDeletedOnCurrentPage === items.length;
+      const targetPage = isCurrentPageFullyDeleted && page > 1 ? page - 1 : page;
+      await fetchViolations(targetPage);
+    } catch (e) {
+      console.error(e);
+      alert("Failed to delete selected records");
+    }
+  };
 
   useEffect(() => { fetchViolations(1); }, [fetchViolations]);
 
@@ -101,8 +175,26 @@ export default function ViolationsLog() {
             </div>
           ) : (
             <>
+              <div className="flex items-center gap-3 py-3 px-4 bg-stone-50/70 border-b border-hairline -mx-6 px-6 mb-2 rounded-t-card">
+                <input
+                  type="checkbox"
+                  checked={items.length > 0 && items.every(item => selectedIds.has(item.id))}
+                  onChange={handleSelectAll}
+                  className="w-4 h-4 rounded border-hairline text-ink bg-canvas focus:ring-0 focus:ring-offset-0 cursor-pointer accent-stone-850"
+                />
+                <span className="font-body text-xs font-semibold text-stone-400 uppercase tracking-widest">
+                  Select All
+                </span>
+              </div>
               {items.map((v, i) => (
-                <ViolationRow key={v.id} violation={v} index={i} />
+                <ViolationRow
+                  key={v.id}
+                  violation={v}
+                  index={i}
+                  selected={selectedIds.has(v.id)}
+                  onToggleSelect={() => handleToggleSelect(v.id)}
+                  onDelete={handleDeleteSingle}
+                />
               ))}
             </>
           )}
@@ -135,6 +227,48 @@ export default function ViolationsLog() {
           </div>
         )}
       </section>
+
+      {/* ── Floating Bulk Action Bar ──────────────────────────────────── */}
+      {selectedIds.size > 0 && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 w-full max-w-md px-4 fade-up">
+          <div className="bg-stone-900/95 text-white rounded-pill px-5 py-3.5 flex items-center justify-between shadow-2xl border border-white/10 backdrop-blur-md">
+            <span className="font-body text-sm font-medium pl-1">
+              {selectedIds.size} selected
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => { setSelectedIds(new Set()); setShowBulkDeleteConfirm(false); }}
+                className="font-body text-xs text-stone-400 hover:text-white transition-colors py-2 px-3"
+              >
+                Clear
+              </button>
+              {showBulkDeleteConfirm ? (
+                <div className="flex items-center gap-1.5 fade-up">
+                  <button
+                    onClick={handleBulkDelete}
+                    className="bg-error hover:opacity-90 text-white font-body font-semibold text-xs py-1.5 px-3.5 rounded-pill transition-opacity"
+                  >
+                    Confirm?
+                  </button>
+                  <button
+                    onClick={() => setShowBulkDeleteConfirm(false)}
+                    className="bg-white/10 hover:bg-white/20 text-white font-body font-semibold text-xs py-1.5 px-3.5 rounded-pill transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setShowBulkDeleteConfirm(true)}
+                  className="bg-error hover:opacity-90 text-white font-body font-semibold text-xs py-1.5 px-3.5 rounded-pill transition-opacity"
+                >
+                  Delete Selected
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

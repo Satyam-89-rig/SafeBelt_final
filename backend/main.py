@@ -286,6 +286,51 @@ def log_manual_violation(
         db_local.close()
 
 
+# ── Violation Deletion ────────────────────────────────────────────────────────
+@app.delete("/api/violations/{violation_id}")
+def delete_violation(
+    violation_id: int,
+    db: Session = Depends(get_db),
+):
+    """Delete a single violation record by ID."""
+    v = db.query(Violation).filter(Violation.id == violation_id).first()
+    if not v:
+        raise HTTPException(status_code=404, detail="Violation record not found")
+    try:
+        db.delete(v)
+        db.commit()
+        logger.info("Violation record %d deleted", violation_id)
+        return {"success": True, "id": violation_id}
+    except Exception as exc:
+        db.rollback()
+        logger.error("Error deleting violation record: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to delete violation record")
+
+
+class BulkDeleteRequest(BaseModel):
+    ids: list[int]
+
+
+@app.post("/api/violations/bulk-delete")
+def bulk_delete_violations(
+    body: BulkDeleteRequest,
+    db: Session = Depends(get_db),
+):
+    """Delete multiple violation records by IDs."""
+    if not body.ids:
+        raise HTTPException(status_code=422, detail="List of ids must not be empty")
+    try:
+        deleted = db.query(Violation).filter(Violation.id.in_(body.ids)).delete(synchronize_session=False)
+        db.commit()
+        logger.info("Deleted %d violation records", deleted)
+        return {"success": True, "count": deleted}
+    except Exception as exc:
+        db.rollback()
+        logger.error("Error bulk deleting violations: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to bulk delete violation records")
+
+
+
 # ── Stats ─────────────────────────────────────────────────────────────────────
 @app.get("/api/stats")
 def get_stats(db: Session = Depends(get_db)):

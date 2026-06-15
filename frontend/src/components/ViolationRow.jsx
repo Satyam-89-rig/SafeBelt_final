@@ -8,6 +8,7 @@
  *   vehicle_make_model, vehicle_color, fuel_type,
  *   owner_name, insurance_status, puc_status
  */
+import { useState } from "react";
 
 const DASH = "—";
 
@@ -88,8 +89,9 @@ function ThumbChip({ b64 }) {
   );
 }
 
-// ── Main row ─────────────────────────────────────────────────────────────────
-export default function ViolationRow({ violation, index }) {
+export default function ViolationRow({ violation, index, selected, onToggleSelect, onDelete }) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
   const {
     plate,
     timestamp,
@@ -128,6 +130,16 @@ export default function ViolationRow({ violation, index }) {
       className="flex items-start gap-4 py-4 divider fade-up"
       style={{ animationDelay: `${index * 0.04}s` }}
     >
+      {/* ── Checkbox for Selection ────────────────────────────────────── */}
+      <div className="flex items-center shrink-0 self-center pr-1">
+        <input
+          type="checkbox"
+          checked={selected || false}
+          onChange={onToggleSelect}
+          className="w-4 h-4 rounded border-hairline text-ink bg-canvas focus:ring-0 focus:ring-offset-0 cursor-pointer accent-stone-850"
+        />
+      </div>
+
       {/* ── Left: circular thumbnail ────────────────────────────────────── */}
       <div
         className="shrink-0 w-14 h-14 rounded-full overflow-hidden border-2 border-error/20
@@ -223,6 +235,47 @@ export default function ViolationRow({ violation, index }) {
 
         {/* PUC status */}
         <StatusChip label="PUC" status={puc_status} />
+      </div>
+
+      {/* ── Right Action: Delete ────────────────────────────────────────── */}
+      <div className="shrink-0 flex items-center justify-center pl-2 self-center">
+        {confirmDelete ? (
+          <div className="flex items-center gap-1.5 fade-up">
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onDelete(violation.id);
+                setConfirmDelete(false);
+              }}
+              className="px-2.5 py-1 text-[0.68rem] font-body font-semibold text-white bg-error rounded-pill hover:opacity-90 transition-opacity"
+            >
+              Confirm
+            </button>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setConfirmDelete(false);
+              }}
+              className="px-2.5 py-1 text-[0.68rem] font-body font-semibold text-stone-500 bg-stone-100 rounded-pill hover:bg-stone-250 transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setConfirmDelete(true);
+            }}
+            className="p-2 text-stone-300 hover:text-error hover:bg-error/5 rounded-full transition-colors duration-200"
+            title="Delete record"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+          </button>
+        )}
       </div>
     </div>
   );

@@ -24,6 +24,7 @@ If your provider uses different field names, edit _parse() below.
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,22 @@ def _str_or_none(d: dict, *keys: str) -> Optional[str]:
     return None
 
 
+def _date_status(date_str: Optional[str]) -> Optional[str]:
+    """Determine status based on a validity date string or fallback to normalisation."""
+    if not date_str:
+        return None
+    try:
+        # Extract date portion before 'T' (e.g. 2022-06-28)
+        date_part = date_str.split("T")[0]
+        dt = datetime.strptime(date_part, "%Y-%m-%d")
+        if dt >= datetime.utcnow():
+            return "ACTIVE"
+        else:
+            return "EXPIRED"
+    except Exception:
+        return _normalise_status(date_str)
+
+
 def _parse(data: dict) -> VehicleInfo:
     """
     Map API response dict → VehicleInfo.
@@ -91,49 +108,78 @@ def _parse(data: dict) -> VehicleInfo:
                               "rc_maker_model", "maker_model")
     color     = _str_or_none(payload,
                               "color", "vehicle_color", "vehicleColour",
-                              "rc_colour", "colour")
+                              "rc_colour", "colour", "rc_color", "rcColor")
     fuel      = _str_or_none(payload,
                               "fuel_type", "fuelType", "rc_fuel_desc",
                               "fuel_desc", "fuel")
     ins_raw   = _str_or_none(payload,
                               "insurance_status", "insuranceStatus",
-                              "insurance_validity", "ins_status")
+                              "insurance_validity", "ins_status", "rc_insurance_upto", "rcInsuranceUpto")
     puc_raw   = _str_or_none(payload,
                               "puc_status", "pucStatus",
-                              "pucc_validity", "puc_validity")
+                              "pucc_validity", "puc_validity", "rc_pucc_upto", "rcPuccUpto", "rc_pucc_validity")
 
     return VehicleInfo(
         owner_name       = owner,
         make_model       = make_mdl,
         color            = color,
         fuel_type        = fuel,
-        insurance_status = _normalise_status(ins_raw),
-        puc_status       = _normalise_status(puc_raw),
+        insurance_status = _date_status(ins_raw),
+        puc_status       = _date_status(puc_raw),
     )
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
-def lookup(plate: str) -> VehicleInfo:
+def _get_alternate_plates(plate: str) -> list[str]:
     """
-    Fetch vehicle details for *plate* from the configured API.
-    Returns VehicleInfo with all None fields on any error.
+    Generate variations of plate by swapping 1 and 4 in the last 4 characters.
+    Handles typical OCR confusion where 1 is read as 4 or 4 as 1.
     """
+    if len(plate) < 4:
+        return []
+    
+    base = plate[:-4]
+    last4 = plate[-4:]
+    
+    options = [last4]
+    
+    # 1. Swap all 1s with 4s and vice versa
+    swapped = ""
+    for char in last4:
+        if char == '1':
+            swapped += '4'
+        elif char == '4':
+            swapped += '1'
+        else:
+            swapped += char
+    if swapped != last4:
+        options.append(swapped)
+        
+    # 2. Swap only the last character if it is 1 or 4
+    if last4[-1] in ('1', '4'):
+        alt_last = last4[:-1] + ('4' if last4[-1] == '1' else '1')
+        if alt_last not in options:
+            options.append(alt_last)
+            
+    return [base + opt for opt in options if opt != last4]
+
+
+def _do_lookup(plate: str) -> VehicleInfo:
+    """Perform the actual API call for a specific plate string."""
     if not _API_KEY:
         logger.warning("VEHICLE_API_KEY not set — skipping vehicle lookup for plate %s", plate)
         return VehicleInfo()
 
-    # Normalise plate: remove spaces, uppercase
     clean_plate = plate.replace(" ", "").upper()
 
     try:
-        import httpx  # lazy import — keeps startup fast if httpx absent
+        import httpx  # lazy import
 
         headers = {
-    "Content-Type": "application/json",
-    "x-api-key": _API_KEY,
-    "Origin": "https://vahandetails.com",
-    "Referer": "https://vahandetails.com/"
-}
+            "Content-Type": "application/json",
+            "x-api-key": _API_KEY,
+            "Origin": "https://vahandetails.com",
+            "Referer": "https://vahandetails.com/"
+        }
 
         resp = httpx.post(
             _API_URL,
@@ -143,20 +189,38 @@ def lookup(plate: str) -> VehicleInfo:
         )
 
         if resp.status_code != 200:
-            logger.warning(
-                "Vehicle API returned %s for plate %s: %s",
-                resp.status_code, plate, resp.text[:200],
-            )
             return VehicleInfo()
 
         data = resp.json()
         info = _parse(data)
+        return info
+
+    except Exception as exc:
+        logger.debug("API call error for plate %s: %s", plate, exc)
+        return VehicleInfo()
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+def lookup(plate: str) -> VehicleInfo:
+    """
+    Fetch vehicle details for *plate* from the configured API.
+    Attempts fallback lookups by swapping confusing digits (1 and 4) if the primary lookup fails.
+    """
+    # Try primary lookup
+    info = _do_lookup(plate)
+    if info.owner_name is not None:
         logger.info("Vehicle lookup OK for %s → %s / %s", plate, info.make_model, info.owner_name)
         return info
 
-    except ImportError:
-        logger.error("httpx not installed — cannot call vehicle API. Run: pip install httpx")
-        return VehicleInfo()
-    except Exception as exc:
-        logger.error("Vehicle lookup error for plate %s: %s", plate, exc)
-        return VehicleInfo()
+    # Try alternate plates swapping 1 and 4
+    clean_plate = plate.replace(" ", "").upper()
+    alternates = _get_alternate_plates(clean_plate)
+    for alt in alternates:
+        logger.info("Primary lookup failed for %s. Retrying alternate: %s", clean_plate, alt)
+        alt_info = _do_lookup(alt)
+        if alt_info.owner_name is not None:
+            logger.info("Vehicle lookup OK (via alternate %s) → %s / %s", alt, alt_info.make_model, alt_info.owner_name)
+            return alt_info
+
+    logger.warning("Vehicle API lookup failed for plate %s and all alternates.", plate)
+    return info

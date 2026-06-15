@@ -320,6 +320,7 @@ class SeatbeltDetector:
         self.total_scanned   = 0
         self.total_violations = 0
         self._violation_callbacks: list[Callable] = []
+        self._last_violation_trigger_time = 0.0  # Added for real-camera violation throttling
 
         self._init_capture(cam_src)
 
@@ -327,16 +328,31 @@ class SeatbeltDetector:
         # 1 — Try real camera
         cap = cv2.VideoCapture(cam_src)
         if cap.isOpened():
-        # Force YUY2 decode on Windows to fix corrupted frames
-            cap = cv2.VideoCapture(cam_src, cv2.CAP_DSHOW)  # CAP_DSHOW = Windows DirectShow
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            cap.set(cv2.CAP_PROP_FPS, 15)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            self._cap = cap
-            logger.info("Camera opened at source: %s", cam_src)
-            return
-        cap.release()
+            # Release default to prevent locks when using CAP_DSHOW
+            cap.release()
+            cap_dshow = cv2.VideoCapture(cam_src, cv2.CAP_DSHOW)
+            if cap_dshow.isOpened():
+                cap_dshow.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap_dshow.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                cap_dshow.set(cv2.CAP_PROP_FPS, 15)
+                cap_dshow.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                self._cap = cap_dshow
+                logger.info("Camera opened at source %s using CAP_DSHOW.", cam_src)
+                return
+            else:
+                cap_dshow.release()
+
+            # Fallback to default backend if DSHOW fails
+            cap_default = cv2.VideoCapture(cam_src)
+            if cap_default.isOpened():
+                self._cap = cap_default
+                logger.info("Camera opened at source %s using default backend.", cam_src)
+                return
+            else:
+                cap_default.release()
+        else:
+            cap.release()
+        
         logger.info("No camera at source %s — falling back to demo.mp4.", cam_src)
 
         # 2 — Generate demo.mp4 if needed, then open it
@@ -439,17 +455,29 @@ class SeatbeltDetector:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         rois: list[tuple[int,int,int,int]] = []
+        yolo_used = False
         if _yolo_model is not None:
             try:
                 results = _yolo_model(frame, verbose=False, classes=[0, 2, 3, 5, 7])
                 for box in results[0].boxes:
                     x1, y1, x2, y2 = map(int, box.xyxy[0])
                     rois.append((x1, y1, x2, y2))
+                yolo_used = True
             except Exception:
                 pass
 
         if not rois:
-            rois = [(0, 0, frame.shape[1], frame.shape[0])]
+            if yolo_used:
+                # YOLO successfully scanned and found no vehicles/people. No violations.
+                return frame, DetectionResult(
+                    compliant        = True,
+                    plate            = None,
+                    thumbnail_jpg    = None,
+                    vehicles_count   = self.total_scanned,
+                    violations_count = self.total_violations,
+                )
+            else:
+                rois = [(0, 0, frame.shape[1], frame.shape[0])]
 
         compliant = False
         for x1, y1, x2, y2 in rois:
@@ -464,25 +492,37 @@ class SeatbeltDetector:
                 cv2.putText(frame, "VIOLATION", (x1, y1 - 6),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.48, (45, 45, 215), 1, cv2.LINE_AA)
 
-        plate = None
-        thumb = None
         if not compliant:
-            self.total_violations += 1
-            # Trigger EasyOCR lazy load on first violation
-            from . import ocr as _ocr
-            _ocr.ensure_loaded()
-            plate = _ocr.read_plate(frame) or "UNKNOWN"
-            thumb = self._make_thumbnail(frame)
-            for cb in self._violation_callbacks:
-                try:
-                    cb(plate=plate, thumbnail_jpg=thumb)
-                except Exception as exc:
-                    logger.debug("Callback error: %s", exc)
+            now = time.time()
+            # Throttling real-camera violations to prevent UI lag/DB spam and run OCR in background
+            if now - self._last_violation_trigger_time > 5.0:
+                self._last_violation_trigger_time = now
+                frame_copy = frame.copy()
+
+                def run_bg_ocr(img):
+                    from . import ocr as _ocr
+                    _ocr.ensure_loaded()
+                    plate_text = _ocr.read_plate(img) or "UNKNOWN"
+                    
+                    self.total_violations += 1
+                    thumb_bytes = self._make_thumbnail(img)
+                    
+                    for cb in self._violation_callbacks:
+                        try:
+                            cb(plate=plate_text, thumbnail_jpg=thumb_bytes)
+                        except Exception as exc:
+                            logger.debug("Callback error: %s", exc)
+
+                    with self._frame_lock:
+                        if self._latest_result is not None:
+                            self._latest_result.plate = plate_text
+
+                threading.Thread(target=run_bg_ocr, args=(frame_copy,), daemon=True).start()
 
         return frame, DetectionResult(
             compliant        = compliant,
-            plate            = plate,
-            thumbnail_jpg    = thumb,
+            plate            = None,
+            thumbnail_jpg    = None,
             vehicles_count   = self.total_scanned,
             violations_count = self.total_violations,
         )
