@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { API_BASE_URL } from "../config";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell,
 } from "recharts";
@@ -40,7 +41,7 @@ export default function Stats() {
   useEffect(() => {
     const poll = async () => {
       try {
-        const res = await fetch("/api/stats");
+        const res = await fetch(`${API_BASE_URL}/api/stats`);
         if (res.ok) { setStats(await res.json()); setLoading(false); }
       } catch { /* backend not up */ }
     };

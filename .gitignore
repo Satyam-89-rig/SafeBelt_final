@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 node_modules/
 demo.mp4
+# Local Netlify folder
+.netlify

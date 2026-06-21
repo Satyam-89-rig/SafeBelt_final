@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { API_BASE_URL } from "../config";
 
 /**
  * PlateScanModal
@@ -8,7 +9,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
  *   onClose(plate: string|null)  — called when user skips or plate is auto-read
  *   streamSrc                    — MJPEG stream URL (defaults to /api/stream)
  */
-export default function PlateScanModal({ onClose, streamSrc = "/api/stream" }) {
+export default function PlateScanModal({ onClose, streamSrc = `${API_BASE_URL}/api/stream` }) {
   const [mode, setMode] = useState("scanning"); // "scanning" | "manual"
   const [manualPlate, setManualPlate] = useState("");
   const [manualError, setManualError] = useState("");
@@ -29,7 +30,7 @@ export default function PlateScanModal({ onClose, streamSrc = "/api/stream" }) {
 
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch("/api/stats");
+        const res = await fetch(`${API_BASE_URL}/api/stats`);
         if (!res.ok) return;
         const data = await res.json();
         const plate = data?.live?.plate;
@@ -64,7 +65,7 @@ export default function PlateScanModal({ onClose, streamSrc = "/api/stream" }) {
     setSubmitting(true);
     setManualError("");
     try {
-      const res = await fetch("/api/violations/manual", {
+      const res = await fetch(`${API_BASE_URL}/api/violations/manual`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({ plate: p }),

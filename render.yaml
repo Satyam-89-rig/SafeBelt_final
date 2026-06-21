@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: safebelt-backend
+    runtime: python
+    buildCommand: "pip install -r requirements-deploy.txt"
+    startCommand: "uvicorn backend.main:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10
+      - key: CAMERA_SOURCE
+        value: "demo.mp4"

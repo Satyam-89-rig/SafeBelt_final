@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import ViolationRow from "../components/ViolationRow";
+import { API_BASE_URL } from "../config";
 
 const PAGE_SIZE = 15;
 
@@ -22,7 +23,7 @@ export default function ViolationsLog() {
       if (dateFilter) params.append("date",     dateFilter);
       if (locFilter)  params.append("location", locFilter);
 
-      const res = await fetch(`/api/violations?${params}`);
+      const res = await fetch(`${API_BASE_URL}/api/violations?${params}`);
       if (!res.ok) throw new Error("Network error");
       const data = await res.json();
       setItems(data.items);
@@ -64,7 +65,7 @@ export default function ViolationsLog() {
 
   const handleDeleteSingle = async (id) => {
     try {
-      const res = await fetch(`/api/violations/${id}`, { method: "DELETE" });
+      const res = await fetch(`${API_BASE_URL}/api/violations/${id}`, { method: "DELETE" });
       if (!res.ok) throw new Error("Delete failed");
       
       setSelectedIds(prev => {
@@ -85,7 +86,7 @@ export default function ViolationsLog() {
   const handleBulkDelete = async () => {
     try {
       const idsArray = Array.from(selectedIds);
-      const res = await fetch("/api/violations/bulk-delete", {
+      const res = await fetch(`${API_BASE_URL}/api/violations/bulk-delete`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ids: idsArray }),

@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef, useCallback } from "react";
+import { API_BASE_URL } from "../config";
 import StreamView from "../components/StreamView";
 import PlateScanModal from "../components/PlateScanModal";
 
@@ -14,7 +15,7 @@ export default function LiveMonitor() {
   useEffect(() => {
     const poll = async () => {
       try {
-        const res = await fetch("/api/stats");
+        const res = await fetch(`${API_BASE_URL}/api/stats`);
         if (res.ok) {
           const data = await res.json();
           setStats(data);

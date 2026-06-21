@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { API_BASE_URL } from "../config";
 
 export default function StreamView() {
   const [status, setStatus] = useState("connecting"); // connecting | live | error
@@ -12,7 +13,7 @@ export default function StreamView() {
   useEffect(() => {
     const poll = async () => {
       try {
-        const res = await fetch("/api/stats");
+        const res = await fetch(`${API_BASE_URL}/api/stats`);
         if (!res.ok) return;
         const data = await res.json();
         setOcrReady(data.ocr_ready   ?? false);
@@ -40,7 +41,7 @@ export default function StreamView() {
       <img
         ref={imgRef}
         id="stream-img"
-        src="/api/stream"
+        src={`${API_BASE_URL}/api/stream`}
         alt="Live seatbelt detection stream"
         className="w-full h-full object-cover"
         onLoad={handleLoad}
@@ -64,7 +65,7 @@ export default function StreamView() {
           </svg>
           <p className="font-body text-sm text-white/70">Stream unavailable — start the backend</p>
           <button
-            onClick={() => { setStatus("connecting"); if(imgRef.current) imgRef.current.src = "/api/stream?" + Date.now(); }}
+            onClick={() => { setStatus("connecting"); if(imgRef.current) imgRef.current.src = `${API_BASE_URL}/api/stream?` + Date.now(); }}
             className="btn-secondary text-white border-white/40 text-xs"
           >
             Retry
