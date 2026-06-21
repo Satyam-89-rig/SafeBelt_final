@@ -6,7 +6,7 @@ export default function StreamView() {
   const [status, setStatus] = useState("connecting"); // connecting | live | error
   const [ocrReady, setOcrReady] = useState(false);
   const [ocrLoading, setOcrLoading] = useState(false);
-  const [isSimMode, setIsSimMode] = useState(window.isSimulationMode);
+  const [isSimMode, setIsSimMode] = useState(window.isStreamSimulated || window.isSimulationMode);
   const [counts, setCounts] = useState({ compliant: 0, violations: 0 });
 
   const imgRef = useRef(null);

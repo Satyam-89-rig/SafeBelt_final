@@ -73,8 +73,9 @@ const incrementScannedCount = () => {
   return count;
 };
 
-// Global mode state
-window.isSimulationMode = false;
+// Global mode states
+window.isSimulationMode = false;      // If true, intercepts all API calls to localStorage
+window.isStreamSimulated = false;     // If true, tells StreamView.jsx to render the Canvas
 window.mockLiveState = { compliant: true, plate: null };
 
 // Check connection to the API
@@ -88,20 +89,30 @@ export async function initializeMockDetector() {
     clearTimeout(timeoutId);
     
     if (res.ok) {
-      console.log("SafeBelt Backend: Connected to live API.");
+      console.log("SafeBelt Backend: Connected to API.");
       window.isSimulationMode = false;
+      
+      // If we are running in the cloud (Netlify), we must render the Canvas road simulation
+      // because there is no webcam attached to Netlify's cloud servers.
+      if (window.location.hostname.includes("netlify.app") || window.location.hostname.includes("netlify.dev")) {
+        console.log("Cloud environment detected: Enabling Canvas highway simulation.");
+        window.isStreamSimulated = true;
+      } else {
+        window.isStreamSimulated = false;
+      }
     } else {
       throw new Error("HTTP error status");
     }
   } catch (err) {
     console.warn("SafeBelt Backend offline — entering Cloud Simulation Mode.");
     window.isSimulationMode = true;
+    window.isStreamSimulated = true;
     window.dispatchEvent(new CustomEvent("api-mode-change", { detail: { simulation: true } }));
     interceptFetch();
   }
 }
 
-// Intercept window.fetch to redirect requests when in simulation mode
+// Intercept window.fetch to redirect requests when in offline simulation mode
 function interceptFetch() {
   const originalFetch = window.fetch;
   
@@ -111,9 +122,6 @@ function interceptFetch() {
     }
     
     const urlString = typeof input === "string" ? input : input.url;
-    
-    // Parse URL using standard browser API
-    // If input is relative, resolve it against window.location.origin
     const parsedUrl = new URL(urlString, window.location.origin);
     const route = parsedUrl.pathname;
     const query = parsedUrl.searchParams;
@@ -133,12 +141,10 @@ function interceptFetch() {
       const scanned = getScannedCount();
       const complianceRate = scanned > 0 ? Math.round(((scanned - violations.length) / scanned) * 100 * 10) / 10 : 100;
       
-      // Generate hourly distribution
       const buckets = [];
       const now = new Date();
       for (let h = 23; h >= 0; h--) {
         const time = new Date(now.getTime() - h * 3600 * 1000);
-        // Find violations in this hour
         const count = violations.filter(v => {
           const vDate = new Date(v.timestamp);
           return vDate.getHours() === time.getHours() && (now.getTime() - vDate.getTime()) < 24 * 3600 * 1000;
@@ -166,8 +172,6 @@ function interceptFetch() {
     // --- Route 3: GET /api/violations ---
     if (route === "/api/violations" && method === "GET") {
       let violations = getViolations();
-      
-      // Apply search filter
       const search = query.get("search") || "";
       if (search) {
         const lowerSearch = search.toLowerCase();
@@ -178,7 +182,6 @@ function interceptFetch() {
         );
       }
       
-      // Sort by timestamp desc
       violations.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
       
       const page = parseInt(query.get("page") || "1", 10);
@@ -236,7 +239,6 @@ function interceptFetch() {
       const idStr = parts[parts.length - 1];
       const id = parseInt(idStr, 10);
       
-      // If it is not a direct numeric ID sub-route, let it fall through (e.g. bulk-delete is POST, not DELETE)
       if (!isNaN(id)) {
         let violations = getViolations();
         const initialLength = violations.length;
@@ -271,33 +273,45 @@ function interceptFetch() {
       }
     }
     
-    // Fallback to original fetch for all other requests (e.g. assets)
     return originalFetch(input, init);
   };
 }
 
 // Function called by Canvas Simulation to log violation dynamically
 export function triggerMockViolation(plate) {
-  if (!window.isSimulationMode) return;
-  
-  const violations = getViolations();
-  // Throttle duplicate violations
-  const duplicate = violations.some(v => v.plate === plate && (Date.now() - new Date(v.timestamp).getTime()) < 30000);
-  if (duplicate) return;
-  
-  const newViolation = {
-    id: Date.now() + Math.floor(Math.random() * 100),
-    plate: plate,
-    timestamp: new Date().toISOString(),
-    compliant: false,
-    vehicle_details: generateRandomVehicleDetails(plate)
-  };
-  
-  violations.push(newViolation);
-  saveViolations(violations);
-  
-  // Dispatch event so React components can update immediately
-  window.dispatchEvent(new CustomEvent("new-violation-detected", { detail: newViolation }));
+  if (window.isSimulationMode) {
+    const violations = getViolations();
+    const duplicate = violations.some(v => v.plate === plate && (Date.now() - new Date(v.timestamp).getTime()) < 30000);
+    if (duplicate) return;
+    
+    const newViolation = {
+      id: Date.now() + Math.floor(Math.random() * 100),
+      plate: plate,
+      timestamp: new Date().toISOString(),
+      compliant: false,
+      vehicle_details: generateRandomVehicleDetails(plate)
+    };
+    
+    violations.push(newViolation);
+    saveViolations(violations);
+    window.dispatchEvent(new CustomEvent("new-violation-detected", { detail: newViolation }));
+  } else {
+    // Online hybrid mode: POST to the real serverless API!
+    const targetUrl = API_BASE_URL ? `${API_BASE_URL}/api/violations/manual` : "/api/violations/manual";
+    fetch(targetUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ plate: plate })
+    })
+    .then(res => {
+      if (res.ok) return res.json();
+      throw new Error("Failed to post");
+    })
+    .then(newViolation => {
+      window.dispatchEvent(new CustomEvent("new-violation-detected", { detail: newViolation }));
+    })
+    .catch(err => console.error("Failed to post mock violation:", err));
+  }
 }
 
 export function triggerMockScanned() {
