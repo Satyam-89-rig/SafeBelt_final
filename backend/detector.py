@@ -527,6 +527,78 @@ class SeatbeltDetector:
             violations_count = self.total_violations,
         )
 
+    def process_custom_frame(self, frame: np.ndarray) -> tuple[np.ndarray, DetectionResult]:
+        self.total_scanned += 1
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        rois: list[tuple[int,int,int,int]] = []
+        yolo_used = False
+        if _yolo_model is not None:
+            try:
+                results = _yolo_model(frame, verbose=False, classes=[0, 2, 3, 5, 7])
+                for box in results[0].boxes:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    rois.append((x1, y1, x2, y2))
+                yolo_used = True
+            except Exception:
+                pass
+
+        if not rois:
+            if yolo_used:
+                # YOLO successfully scanned and found no vehicles/people. No violations.
+                return frame, DetectionResult(
+                    compliant        = True,
+                    plate            = None,
+                    thumbnail_jpg    = None,
+                    vehicles_count   = self.total_scanned,
+                    violations_count = self.total_violations,
+                )
+            else:
+                rois = [(0, 0, frame.shape[1], frame.shape[0])]
+
+        compliant = False
+        for x1, y1, x2, y2 in rois:
+            roi_gray = gray[y1:y2, x1:x2]
+            if self._detect_apriltag(roi_gray):
+                compliant = True
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (55, 195, 75), 2)
+                cv2.putText(frame, "SEATBELT DETECTED", (x1, y1 - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.48, (55, 195, 75), 1, cv2.LINE_AA)
+            else:
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (45, 45, 215), 2)
+                cv2.putText(frame, "VIOLATION", (x1, y1 - 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.48, (45, 45, 215), 1, cv2.LINE_AA)
+
+        if not compliant:
+            now = time.time()
+            if now - self._last_violation_trigger_time > 5.0:
+                self._last_violation_trigger_time = now
+                frame_copy = frame.copy()
+
+                def run_bg_ocr(img):
+                    from . import ocr as _ocr
+                    _ocr.ensure_loaded()
+                    plate_text = _ocr.read_plate(img) or "UNKNOWN"
+                    
+                    self.total_violations += 1
+                    thumb_bytes = self._make_thumbnail(img)
+                    
+                    for cb in self._violation_callbacks:
+                        try:
+                            cb(plate=plate_text, thumbnail_jpg=thumb_bytes)
+                        except Exception as exc:
+                            logger.debug("Callback error: %s", exc)
+
+                threading.Thread(target=run_bg_ocr, args=(frame_copy,), daemon=True).start()
+
+        return frame, DetectionResult(
+            compliant        = compliant,
+            plate            = None,
+            thumbnail_jpg    = None,
+            vehicles_count   = self.total_scanned,
+            violations_count = self.total_violations,
+        )
+
     @staticmethod
     def _make_thumbnail(frame: np.ndarray) -> bytes:
         small = cv2.resize(frame, (320, 180))
@@ -536,3 +608,4 @@ class SeatbeltDetector:
     def encode_frame_jpeg(self, frame: np.ndarray) -> bytes:
         _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 82])
         return buf.tobytes()
+

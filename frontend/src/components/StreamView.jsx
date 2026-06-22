@@ -3,20 +3,32 @@ import { API_BASE_URL } from "../config";
 import { triggerMockViolation, triggerMockScanned } from "../mockBackend";
 
 export default function StreamView() {
+  const [streamSource, setStreamSource] = useState(() => {
+    if (window.isStreamSimulated || window.isSimulationMode) {
+      return "simulation";
+    }
+    return "server";
+  });
   const [status, setStatus] = useState("connecting"); // connecting | live | error
   const [ocrReady, setOcrReady] = useState(false);
   const [ocrLoading, setOcrLoading] = useState(false);
-  const [isSimMode, setIsSimMode] = useState(window.isStreamSimulated || window.isSimulationMode);
   const [counts, setCounts] = useState({ compliant: 0, violations: 0 });
 
+  const [processedWebcamFrame, setProcessedWebcamFrame] = useState(null);
+  const [webcamError, setWebcamError] = useState(null);
+
   const imgRef = useRef(null);
+  const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const webcamStreamRef = useRef(null);
+  const offscreenCanvasRef = useRef(null);
+  const processIntervalRef = useRef(null);
 
   // Sync mode state and listen to mode change event
   useEffect(() => {
     const handleModeChange = (e) => {
       if (e.detail?.simulation) {
-        setIsSimMode(true);
+        setStreamSource("simulation");
         setStatus("live");
       }
     };
@@ -48,7 +60,7 @@ export default function StreamView() {
 
   // Sync compliance counts from local events in simulation mode
   useEffect(() => {
-    if (!isSimMode) return;
+    if (streamSource !== "simulation") return;
     const handleNewViolation = () => {
       // Re-fetch stats from intercepted mock endpoint
       fetch(`${API_BASE_URL}/api/stats`)
@@ -62,11 +74,112 @@ export default function StreamView() {
     };
     window.addEventListener("new-violation-detected", handleNewViolation);
     return () => window.removeEventListener("new-violation-detected", handleNewViolation);
-  }, [isSimMode]);
+  }, [streamSource]);
+
+  // Webcam media access and processing loop
+  useEffect(() => {
+    if (streamSource !== "webcam") {
+      stopWebcam();
+      return;
+    }
+
+    let isSubscribed = true;
+    const startWebcam = async () => {
+      try {
+        setWebcamError(null);
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 640, height: 480, facingMode: "user" }
+        });
+        if (!isSubscribed) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        webcamStreamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch((e) => console.error("Video playback error:", e));
+        }
+        setStatus("live");
+        startProcessingLoop();
+      } catch (err) {
+        console.error("Webcam access error:", err);
+        setWebcamError(err.message || "Failed to access webcam device camera.");
+      }
+    };
+
+    startWebcam();
+
+    return () => {
+      isSubscribed = false;
+      stopWebcam();
+    };
+  }, [streamSource]);
+
+  const stopWebcam = () => {
+    if (processIntervalRef.current) {
+      clearInterval(processIntervalRef.current);
+      processIntervalRef.current = null;
+    }
+    if (webcamStreamRef.current) {
+      webcamStreamRef.current.getTracks().forEach((track) => track.stop());
+      webcamStreamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setProcessedWebcamFrame(null);
+  };
+
+  const startProcessingLoop = () => {
+    if (processIntervalRef.current) clearInterval(processIntervalRef.current);
+
+    processIntervalRef.current = setInterval(async () => {
+      if (!videoRef.current || !webcamStreamRef.current) return;
+      const video = videoRef.current;
+      if (video.readyState < 2) return; // Wait for frames to load
+
+      let canvas = offscreenCanvasRef.current;
+      if (!canvas) {
+        canvas = document.createElement("canvas");
+        offscreenCanvasRef.current = canvas;
+      }
+      canvas.width = 640;
+      canvas.height = 480;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const base64Img = canvas.toDataURL("image/jpeg", 0.7);
+
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/process_frame`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image: base64Img }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setProcessedWebcamFrame(data.image);
+          if (!data.compliant) {
+            window.dispatchEvent(
+              new CustomEvent("new-violation-detected", {
+                detail: {
+                  id: Date.now(),
+                  plate: data.plate || "WEBCAM_VIOLATION",
+                  timestamp: new Date().toISOString(),
+                },
+              })
+            );
+          }
+        }
+      } catch (err) {
+        console.error("Frame processing fetch failed:", err);
+      }
+    }, 250); // ~4 FPS
+  };
 
   // Canvas Simulation Engine
   useEffect(() => {
-    if (!isSimMode || !canvasRef.current) return;
+    if (streamSource !== "simulation" || !canvasRef.current) return;
     const canvas = canvasRef.current;
     const ctx = canvas.getContext("2d");
     let animationId;
@@ -338,102 +451,180 @@ export default function StreamView() {
     render();
 
     return () => cancelAnimationFrame(animationId);
-  }, [isSimMode]);
+  }, [streamSource]);
 
   // Track stream img load/error
   const handleLoad = () => setStatus("live");
   const handleError = () => setStatus("error");
 
+  const isSimMode = streamSource === "simulation";
+
   return (
-    <div
-      className="relative w-full rounded-card overflow-hidden border border-hairline bg-ink"
-      style={{ aspectRatio: "16/9" }}
-    >
-      {/* Simulation Canvas (only active when offline) */}
-      {isSimMode ? (
-        <canvas ref={canvasRef} className="w-full h-full object-cover" />
-      ) : (
-        /* MJPEG stream */
-        <img
-          ref={imgRef}
-          id="stream-img"
-          src={`${API_BASE_URL}/api/stream`}
-          alt="Live seatbelt detection stream"
-          className="w-full h-full object-cover"
-          onLoad={handleLoad}
-          onError={handleError}
-        />
-      )}
+    <div className="flex flex-col gap-4 w-full">
+      {/* Stream Container */}
+      <div
+        className="relative w-full rounded-card overflow-hidden border border-hairline bg-ink"
+        style={{ aspectRatio: "16/9" }}
+      >
+        {/* Simulation Canvas (only active when offline) */}
+        {streamSource === "simulation" && (
+          <canvas ref={canvasRef} className="w-full h-full object-cover" />
+        )}
 
-      {/* Connecting overlay */}
-      {status === "connecting" && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-ink/80 text-white gap-3">
-          <div className="w-10 h-10 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-          <p className="font-body text-sm text-white/70">Connecting to stream…</p>
-        </div>
-      )}
+        {/* Server Stream */}
+        {streamSource === "server" && (
+          <img
+            ref={imgRef}
+            id="stream-img"
+            src={`${API_BASE_URL}/api/stream`}
+            alt="Live seatbelt detection stream"
+            className="w-full h-full object-cover"
+            onLoad={handleLoad}
+            onError={handleError}
+          />
+        )}
 
-      {/* Error overlay */}
-      {status === "error" && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-ink/90 text-white gap-3">
-          <svg className="w-10 h-10 text-error" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={1.5}
-              d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"
-            />
-          </svg>
-          <p className="font-body text-sm text-white/70">Stream unavailable — start the backend</p>
-          <button
-            onClick={() => {
-              setStatus("connecting");
-              if (imgRef.current) imgRef.current.src = `${API_BASE_URL}/api/stream?` + Date.now();
-            }}
-            className="btn-secondary text-white border-white/40 text-xs"
+        {/* Webcam stream */}
+        {streamSource === "webcam" && (
+          <div className="w-full h-full relative flex items-center justify-center bg-ink">
+            <video ref={videoRef} className="hidden" playsInline muted />
+            {webcamError ? (
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-ink/90 text-white gap-3 p-4 text-center">
+                <svg className="w-10 h-10 text-error" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+                </svg>
+                <p className="font-body text-sm text-white/70">Camera Access Denied or Unavailable</p>
+                <p className="text-xs text-white/50">{webcamError}</p>
+                <button
+                  onClick={() => setStreamSource("server")}
+                  className="btn-secondary text-white border-white/40 text-xs mt-2"
+                >
+                  Back to Server Feed
+                </button>
+              </div>
+            ) : processedWebcamFrame ? (
+              <img
+                src={processedWebcamFrame}
+                alt="Processed webcam stream"
+                className="w-full h-full object-cover"
+              />
+            ) : (
+              <div className="absolute inset-0 flex flex-col items-center justify-center bg-ink/80 text-white gap-3">
+                <div className="w-10 h-10 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                <p className="font-body text-sm text-white/70">Initializing your webcam feed…</p>
+                <p className="text-[10px] text-white/40">AI seatbelt detection is processed by Render cloud backend</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Connecting overlay */}
+        {streamSource === "server" && status === "connecting" && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-ink/80 text-white gap-3">
+            <div className="w-10 h-10 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            <p className="font-body text-sm text-white/70">Connecting to stream…</p>
+          </div>
+        )}
+
+        {/* Error overlay */}
+        {streamSource === "server" && status === "error" && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-ink/90 text-white gap-3">
+            <svg className="w-10 h-10 text-error" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={1.5}
+                d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"
+              />
+            </svg>
+            <p className="font-body text-sm text-white/70">Stream unavailable — start the backend</p>
+            <button
+              onClick={() => {
+                setStatus("connecting");
+                if (imgRef.current) imgRef.current.src = `${API_BASE_URL}/api/stream?` + Date.now();
+              }}
+              className="btn-secondary text-white border-white/40 text-xs"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        {/* Live badge top-left */}
+        {status === "live" && (
+          <div className="absolute top-4 left-4 flex items-center gap-2">
+            <span className="flex h-2.5 w-2.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-error opacity-75" />
+              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-error" />
+            </span>
+            <span className="badge badge-error backdrop-blur-sm bg-white/90">
+              {isSimMode ? "SIMULATED" : "LIVE"}
+            </span>
+          </div>
+        )}
+
+        {/* Count badges top-right */}
+        {status === "live" && (
+          <div className="absolute top-4 right-4 flex gap-2">
+            <span id="badge-compliant" className="badge badge-success backdrop-blur-sm bg-white/90">
+              ✓ {counts.compliant} Compliant
+            </span>
+            <span id="badge-violation" className="badge badge-error backdrop-blur-sm bg-white/90">
+              ✗ {counts.violations} Violations
+            </span>
+          </div>
+        )}
+
+        {/* OCR loading banner — only shown while actively loading */}
+        {ocrLoading && !ocrReady && status === "live" && !isSimMode && (
+          <div
+            className="absolute bottom-0 left-0 right-0 bg-amber-600/92 backdrop-blur-sm px-4 py-2.5
+                          flex items-center gap-2.5"
           >
-            Retry
-          </button>
-        </div>
-      )}
+            <div className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin shrink-0" />
+            <p className="font-body text-xs text-white font-medium tracking-wide">
+              Initializing OCR engine — plate recognition will begin shortly
+            </p>
+          </div>
+        )}
+      </div>
 
-      {/* Live badge top-left */}
-      {status === "live" && (
-        <div className="absolute top-4 left-4 flex items-center gap-2">
-          <span className="flex h-2.5 w-2.5">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-error opacity-75" />
-            <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-error" />
-          </span>
-          <span className="badge badge-error backdrop-blur-sm bg-white/90">
-            {isSimMode ? "SIMULATED" : "LIVE"}
-          </span>
-        </div>
-      )}
-
-      {/* Count badges top-right */}
-      {status === "live" && (
-        <div className="absolute top-4 right-4 flex gap-2">
-          <span id="badge-compliant" className="badge badge-success backdrop-blur-sm bg-white/90">
-            ✓ {counts.compliant} Compliant
-          </span>
-          <span id="badge-violation" className="badge badge-error backdrop-blur-sm bg-white/90">
-            ✗ {counts.violations} Violations
-          </span>
-        </div>
-      )}
-
-      {/* OCR loading banner — only shown while actively loading */}
-      {ocrLoading && !ocrReady && status === "live" && !isSimMode && (
-        <div
-          className="absolute bottom-0 left-0 right-0 bg-amber-600/92 backdrop-blur-sm px-4 py-2.5
-                        flex items-center gap-2.5"
+      {/* Stream Source Toggle Control */}
+      <div className="flex items-center justify-center p-1 bg-stone-100 rounded-card border border-hairline max-w-sm mx-auto w-full">
+        <button
+          onClick={() => {
+            setStatus("connecting");
+            setStreamSource("server");
+          }}
+          className={`flex-1 py-1.5 px-3 text-[10px] uppercase tracking-wider font-semibold rounded-pill transition-all duration-200 ${
+            streamSource === "server"
+              ? "bg-white text-ink shadow-sm"
+              : "text-stone-400 hover:text-stone-600"
+          }`}
         >
-          <div className="w-3.5 h-3.5 border-2 border-white/40 border-t-white rounded-full animate-spin shrink-0" />
-          <p className="font-body text-xs text-white font-medium tracking-wide">
-            Initializing OCR engine — plate recognition will begin shortly
-          </p>
-        </div>
-      )}
+          Server Feed
+        </button>
+        <button
+          onClick={() => setStreamSource("webcam")}
+          className={`flex-1 py-1.5 px-3 text-[10px] uppercase tracking-wider font-semibold rounded-pill transition-all duration-200 ${
+            streamSource === "webcam"
+              ? "bg-white text-ink shadow-sm"
+              : "text-stone-400 hover:text-stone-600"
+          }`}
+        >
+          My Camera
+        </button>
+        <button
+          onClick={() => setStreamSource("simulation")}
+          className={`flex-1 py-1.5 px-3 text-[10px] uppercase tracking-wider font-semibold rounded-pill transition-all duration-200 ${
+            streamSource === "simulation"
+              ? "bg-white text-ink shadow-sm"
+              : "text-stone-400 hover:text-stone-600"
+          }`}
+        >
+          Highway Sim
+        </button>
+      </div>
     </div>
   );
 }

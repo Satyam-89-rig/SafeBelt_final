@@ -373,3 +373,41 @@ def ocr_status():
         "ready":   _ocr.is_ready(),
         "loading": _ocr.is_loading(),
     }
+
+
+# ── Custom frame processing (Webcam) ──────────────────────────────────────────
+class FramePayload(BaseModel):
+    image: str  # base64 encoded jpeg data URL
+
+@app.post("/api/process_frame")
+def process_frame(payload: FramePayload):
+    """
+    Accepts a base64-encoded frame from client webcam,
+    runs seatbelt detection, and returns the annotated frame as base64.
+    """
+    try:
+        header, encoded = payload.image.split(",", 1) if "," in payload.image else ("", payload.image)
+        img_data = base64.b64decode(encoded)
+        
+        import cv2
+        import numpy as np
+        
+        nparr = np.frombuffer(img_data, np.uint8)
+        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if frame is None:
+            raise HTTPException(status_code=400, detail="Invalid image data")
+
+        processed_frame, result = detector.process_custom_frame(frame)
+
+        _, buffer = cv2.imencode(".jpg", processed_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        processed_b64 = base64.b64encode(buffer).decode("utf-8")
+
+        return {
+            "image": f"data:image/jpeg;base64,{processed_b64}",
+            "compliant": result.compliant,
+            "plate": result.plate,
+        }
+    except Exception as exc:
+        logger.error("Error processing custom frame: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
